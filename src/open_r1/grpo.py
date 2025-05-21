@@ -28,11 +28,69 @@ from open_r1.utils import get_model, get_tokenizer
 from open_r1.utils.callbacks import get_callbacks
 from open_r1.utils.wandb_logging import init_wandb_training
 from trl import GRPOTrainer, ModelConfig, TrlParser, get_peft_config
-
+import torch
 
 logger = logging.getLogger(__name__)
 
+from transformers import TrainerCallback
 
+import wandb
+
+class GradientMonitorCallback(TrainerCallback):
+    def __init__(self):
+        self.grad_running_mean = None
+        self.grad_running_mean_squared = None
+
+    def on_pre_optimizer_step(self, args, state, control, **kwargs):
+        model = kwargs["model"]
+        accelerator = kwargs["accelerator"]
+
+        # this is step before current step, because step increments after this callback in trainer
+        step = state.global_step
+
+        # Collect all gradients in a single flattened vector
+        grads = [p.grad.detach().view(-1) for p in model.parameters() if p.grad is not None]
+        if not grads:
+            return  # Skip if no grads this step
+
+        flat_grad = torch.cat(grads)
+        grad_norm = torch.norm(flat_grad, p=2).item()
+        grad_var = torch.var(flat_grad).item()
+
+        # Initialize or update running stats
+        if self.grad_running_mean is None:
+            self.grad_running_mean = flat_grad.clone()
+            self.grad_running_mean_squared = flat_grad.clone() ** 2
+        else:
+            self.grad_running_mean = (self.grad_running_mean * step + flat_grad) / (step + 1)
+            self.grad_running_mean_squared = (self.grad_running_mean_squared * step + flat_grad ** 2) / (step + 1)
+
+        # Reduce stats across processes (mean reduction)
+        grad_norm_tensor = torch.tensor(grad_norm, device=accelerator.device)
+        grad_var_tensor = torch.tensor(grad_var, device=accelerator.device)
+
+        grad_norm_tensor = accelerator.reduce(grad_norm_tensor, reduction="mean")
+        grad_var_tensor = accelerator.reduce(grad_var_tensor, reduction="mean")
+        flat_grad = accelerator.reduce(flat_grad, reduction="mean")
+        self.grad_running_mean = accelerator.reduce(self.grad_running_mean, reduction="mean")
+        self.grad_running_mean_squared = accelerator.reduce(self.grad_running_mean_squared, reduction="mean")
+        if step + 1 >= 10:
+            grad_std = (self.grad_running_mean_squared - self.grad_running_mean ** 2).sqrt()
+            lambda_sigma = 3.0
+            deviation = (flat_grad - self.grad_running_mean).abs()
+            outliers = (deviation > lambda_sigma * grad_std)
+            proportion_outliers = outliers.float().mean().item()
+
+
+        if accelerator.is_main_process:
+            info = {
+                "grad/post_clip_norm": grad_norm_tensor.item(),
+                "grad/variance": grad_var_tensor.item(),
+            }
+            if step + 1 >= 10:
+                info["grad/proportion_spike"] = proportion_outliers
+            wandb.log(info)
+            #print(f"[Step {step + 1}] Pre-clip grad norm: {grad_norm_tensor.item():.4f} | Var: {grad_var_tensor.item():.4f}")
 def main(script_args, training_args, model_args):
     # Set seed for reproducibility
     set_seed(training_args.seed)
@@ -72,7 +130,7 @@ def main(script_args, training_args, model_args):
         init_wandb_training(training_args)
 
     # Load the dataset
-    dataset = load_dataset(script_args.dataset_name, name=script_args.dataset_config)
+    dataset = load_dataset(script_args.dataset_name, name=script_args.dataset_config, cache_dir="/home/wenquan-lu/hf_dataset_cache")
 
     ################
     # Load tokenizer
@@ -110,6 +168,8 @@ def main(script_args, training_args, model_args):
     #############################
     # Initialize the GRPO trainer
     #############################
+    call_backs = get_callbacks(training_args, model_args)
+    call_backs.append(GradientMonitorCallback)
     trainer = GRPOTrainer(
         model=model,
         reward_funcs=reward_funcs,
@@ -117,7 +177,7 @@ def main(script_args, training_args, model_args):
         train_dataset=dataset[script_args.dataset_train_split],
         eval_dataset=(dataset[script_args.dataset_test_split] if training_args.eval_strategy != "no" else None),
         peft_config=get_peft_config(model_args),
-        callbacks=get_callbacks(training_args, model_args),
+        callbacks=call_backs,
         processing_class=tokenizer,
     )
 
