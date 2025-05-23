@@ -89,7 +89,8 @@ class GradientMonitorCallback(TrainerCallback):
             }
             if step + 1 >= 10:
                 info["grad/proportion_spike"] = proportion_outliers
-            wandb.log(info)
+            #print(f"[Step Debug] HF global_step: {state.global_step}, wandb.run.step: {wandb.run.step}")
+            wandb.log(info, step=wandb.run.step + 1)
             #print(f"[Step {step + 1}] Pre-clip grad norm: {grad_norm_tensor.item():.4f} | Var: {grad_var_tensor.item():.4f}")
 def main(script_args, training_args, model_args):
     # Set seed for reproducibility
