@@ -1,0 +1,5 @@
+conda activate grpo
+conda install -c nvidia cuda-toolkit=12.1
+conda install -c conda-forge git-lfs
+pip install -e .[dev]
+
