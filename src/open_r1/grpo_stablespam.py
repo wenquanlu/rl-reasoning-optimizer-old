@@ -38,6 +38,7 @@ import os
 sys.path.append(os.path.abspath("/home/wenquan-lu/Workspace/rl-reasoning-optimizer/StableSPAM"))
 import wandb
 from galore_torch import StableSPAM
+from open_r1.utils.train_utils import get_decay_parameter_names
 
 class GradientMonitorCallback(TrainerCallback):
     def __init__(self):
@@ -134,24 +135,40 @@ def main(script_args, training_args, model_args):
         init_wandb_training(training_args)
 
     # Load the dataset
-    dataset = load_dataset(script_args.dataset_name, name=script_args.dataset_config, cache_dir="/home/wenquan-lu/hf_dataset_cache")
+    dataset = load_dataset(script_args.dataset_name, name=script_args.dataset_config)
 
     ################
     # Load tokenizer
     ################
     tokenizer = get_tokenizer(model_args, training_args)
 
-    train_dataset = dataset["train"]
-    num_examples = len(train_dataset)
+    #train_dataset = dataset["train"]
+    #num_examples = len(train_dataset)
 
-    total_T = ceil(num_examples / (training_args.per_device_train_batch_size * training_args.gradient_accumulation_steps)) * int(training_args.num_train_epochs)
+    #total_T = ceil(num_examples / (training_args.per_device_train_batch_size * training_args.gradient_accumulation_steps)) * int(training_args.num_train_epochs)
 
     ##############
     # Load model #
     ##############
     logger.info("*** Loading model ***")
     model = get_model(model_args, training_args)
-    optimizer = StableSPAM(model.parameters(), lr=2.0e-5,gamma1=0.7,gamma2=0.9,gamma3=0.999,total_T=total_T,update_proj_gap=100)
+    decay_parameters = get_decay_parameter_names(model)
+    decay_value = getattr(training_args, "weight_decay", 0.0)
+    optimizer_grouped_parameters = [
+        {
+            "params": [
+                p for n, p in model.named_parameters() if (n in decay_parameters and p.requires_grad)
+            ],
+            "weight_decay": decay_value,
+        },
+        {
+            "params": [
+                p for n, p in model.named_parameters() if (n not in decay_parameters and p.requires_grad)
+            ],
+            "weight_decay": 0.0,
+        },
+    ]
+    optimizer = StableSPAM(optimizer_grouped_parameters, lr=2.0e-5,gamma1=0.7,gamma2=0.9,gamma3=0.999,update_proj_gap=100) # total_T=total_T
 
     # Get reward functions from the registry
     reward_funcs = get_reward_funcs(script_args)

@@ -15,7 +15,7 @@
 import logging
 import os
 import sys
-
+os.environ["WANDB_API_KEY"] = "8d9092d39ddbffe346a0646fd17158425d700aff"
 import datasets
 import transformers
 from datasets import load_dataset
@@ -28,9 +28,6 @@ from open_r1.utils import get_model, get_tokenizer
 from open_r1.utils.callbacks import get_callbacks
 from open_r1.utils.wandb_logging import init_wandb_training
 from trl import GRPOTrainer, ModelConfig, TrlParser, get_peft_config
-sys.path.append(os.path.abspath("/home/wenquan-lu/Workspace/rl-reasoning-optimizer/Muon"))
-from muon import MuonWithAuxAdam
-from open_r1.utils.train_utils import get_decay_parameter_names
 import torch
 
 logger = logging.getLogger(__name__)
@@ -38,6 +35,9 @@ logger = logging.getLogger(__name__)
 from transformers import TrainerCallback
 
 import wandb
+import re
+
+ANS_RE = re.compile(r"#### (\-?[0-9\.\,]+)")
 
 class GradientMonitorCallback(TrainerCallback):
     def __init__(self):
@@ -45,6 +45,7 @@ class GradientMonitorCallback(TrainerCallback):
         self.grad_running_mean_squared = None
 
     def on_pre_optimizer_step(self, args, state, control, **kwargs):
+        return
         model = kwargs["model"]
         accelerator = kwargs["accelerator"]
 
@@ -146,46 +147,18 @@ def main(script_args, training_args, model_args):
     ##############
     logger.info("*** Loading model ***")
     model = get_model(model_args, training_args)
-    # Identify decay and no_decay parameter names
-    decay_parameters = get_decay_parameter_names(model)
-    weight_decay_value = getattr(training_args, "weight_decay", 0.0)
-    learning_rate_value = getattr(training_args, "learning_rate", 2.0e-05)
-
-    # Separate all model parameters by name
-    decay_muon_params = []
-    no_decay_muon_params = []
-    decay_adam_params = []
-    no_decay_adam_params = []
-
-    for name, param in model.named_parameters():
-        if not param.requires_grad:
-            continue
-        if name in decay_parameters:
-            if param.ndim >= 2 and "embed" not in name and "lm_head" not in name:
-                decay_muon_params.append(param)
-            else:
-                decay_adam_params.append(param)
-        else:
-            if param.ndim >= 2 and "embed" not in name and "lm_head" not in name:
-                no_decay_muon_params.append(param)
-            else:
-                no_decay_adam_params.append(param)
-    print(f"# decay_muon_params: {len(decay_muon_params)}")
-    print(f"# no_decay_muon_params: {len(no_decay_muon_params)}")
-
-    # Create optimizer groups
-    optimizer_grouped_parameters = [
-        dict(params=decay_muon_params, weight_decay=weight_decay_value, use_muon=True),
-        dict(params=no_decay_muon_params, weight_decay=0.0, use_muon=True),
-        dict(params=decay_adam_params, betas=(0.9, 0.999), weight_decay=weight_decay_value, use_muon=False),
-        dict(params=no_decay_adam_params, betas=(0.9, 0.999), weight_decay=0.0, use_muon=False),
-    ]
-
-    optimizer = MuonWithAuxAdam(optimizer_grouped_parameters)
 
     # Get reward functions from the registry
     reward_funcs = get_reward_funcs(script_args)
 
+    def extract_hash_answer(completion):
+        match = ANS_RE.search(completion)
+        if match:
+            match_str = match.group(1).strip()
+            match_str = match_str.replace(",", "")
+            return match_str
+        else:
+            return None
     # Format into conversation
     def make_conversation(example, prompt_column: str = script_args.dataset_prompt_column):
         prompt = []
@@ -195,9 +168,9 @@ def main(script_args, training_args, model_args):
 
         if prompt_column not in example:
             raise ValueError(f"Dataset Question Field Error: {prompt_column} is not supported.")
-
+        solution = extract_hash_answer(example["answer"])
         prompt.append({"role": "user", "content": example[prompt_column]})
-        return {"prompt": prompt}
+        return {"prompt": prompt, "solution": solution}
 
     dataset = dataset.map(make_conversation)
 
@@ -219,7 +192,6 @@ def main(script_args, training_args, model_args):
         peft_config=get_peft_config(model_args),
         callbacks=call_backs,
         processing_class=tokenizer,
-        optimizers=(optimizer, None)
     )
 
     ###############
