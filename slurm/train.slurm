@@ -1,14 +1,13 @@
 #!/bin/bash
 #SBATCH --job-name=open_r1
 #SBATCH --ntasks-per-node=1
-#SBATCH --exclusive
-#SBATCH --gres=gpu:8
-#SBATCH --partition=hopper-prod  # Adjust this for your cluster
+#SBATCH --gres=gpu:1
 #SBATCH --output=./logs/%x-%j.out
 #SBATCH --error=./logs/%x-%j.err
 #SBATCH --requeue
-#SBATCH --time=3-00:00:00
-
+#SBATCH --time=4-00:00:00
+#SBATCH --nodes=1
+#SBATCH --partition=gpu
 
 if [[ "$*" == *"--help"* ]]; then
   echo "Usage: sbatch slurm/train.slurm [options]"
@@ -24,11 +23,10 @@ if [[ "$*" == *"--help"* ]]; then
 fi
 
 # Specific configuration optimized for the Hugging Face Compute Cluster
-module load cuda/12.4
 set -x -e
 
-source ~/.bashrc
-source openr1/bin/activate
+#source ~/miniconda3/etc/profile.d/conda.sh
+#conda activate grpo
 START_TIME=$(date +%s)
 echo "START TIME: $(date)"
 
@@ -88,7 +86,13 @@ if [[ -z "$MODEL" || -z "$TASK" || -z "$CONFIG_SUFFIX" || -z "$ACCELERATOR" ]]; 
 fi
 
 
-CONFIG_FILE=recipes/$MODEL/$TASK/config_$CONFIG_SUFFIX.yaml
+if [[ "$TASK" == grpo* ]]; then
+  CONFIG_FILE=recipes/$MODEL/grpo/config_$CONFIG_SUFFIX.yaml
+elif [[ "$TASK" == sft* ]]; then
+  CONFIG_FILE=recipes/$MODEL/sft/config_$CONFIG_SUFFIX.yaml
+else
+  CONFIG_FILE=recipes/$MODEL/$TASK/config_$CONFIG_SUFFIX.yaml
+fi
 GRAD_ACC_STEPS=$(grep 'gradient_accumulation_steps' $CONFIG_FILE | awk '{print $2}')
 
 # Split the string into individual arguments
@@ -109,7 +113,7 @@ REVISION=$(grep 'model_revision:' $CONFIG_FILE | head -n 1 | awk '{print $2}')
 
 # Distributed configuration
 NUM_NODES=$SLURM_NNODES
-GPUS_PER_NODE=8
+GPUS_PER_NODE=1
 WORLD_SIZE=$(($NUM_NODES*$GPUS_PER_NODE))
 NODELIST=($(scontrol show hostnames $SLURM_JOB_NODELIST))
 MASTER_ADDR=${NODELIST[0]}  # First node for main process
